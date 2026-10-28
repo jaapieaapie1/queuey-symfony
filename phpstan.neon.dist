@@ -1,0 +1,10 @@
+# `phpstan/extension-installer` registers Pest's `extension.neon` and
+# `phpstan/phpstan-symfony` for us, so neither is included by hand: doing both
+# registers the same services twice and PHPStan refuses to start.
+parameters:
+    level: max
+    paths:
+        - src
+        - tests
+        - config
+    treatPhpDocTypesAsCertain: false

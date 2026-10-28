@@ -1,0 +1,8 @@
+/vendor/
+/var/
+/tests/Fixtures/App/var/
+/.phpunit.cache/
+/.php-cs-fixer.cache
+/.phpunit.result.cache
+# A library does not pin its dependencies: CI resolves every Symfony leg fresh.
+/composer.lock

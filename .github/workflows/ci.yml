@@ -1,0 +1,150 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+  # release.yml runs this workflow as its gate before publishing a tag.
+  workflow_call:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: PHP ${{ matrix.php }} / Symfony ${{ matrix.symfony }}
+    runs-on: ubuntu-latest
+
+    strategy:
+      fail-fast: false
+      matrix:
+        php: ['8.3', '8.4', '8.5']
+        # The three supported branches. `composer.json` stays
+        # `^6.4 || ^7.0 || ^8.0`; each leg pins the components explicitly in the
+        # job (see the install steps below). No lock file is committed, so every
+        # leg resolves fresh.
+        symfony: ['6.4.*', '7.*', '8.*']
+        exclude:
+          # Symfony 8 requires PHP 8.4.
+          - php: '8.3'
+            symfony: '8.*'
+
+    services:
+      rabbitmq:
+        image: rabbitmq:4-management
+        ports:
+          - 5672:5672
+          - 15672:15672
+        options: >-
+          --health-cmd "rabbitmq-diagnostics -q ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 12
+          --health-start-period 30s
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: ${{ matrix.php }}
+          extensions: json, mbstring, pcntl, sockets
+          coverage: none
+          tools: composer:v2
+
+      # Before anything below edits it, so it is the *committed* composer.json
+      # that is validated.
+      - name: Validate composer.json
+        run: composer validate --strict --no-check-lock
+
+      - name: Cache Composer packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/composer/files
+          key: composer-${{ matrix.php }}-${{ matrix.symfony }}-${{ hashFiles('composer.json') }}
+          restore-keys: composer-${{ matrix.php }}-${{ matrix.symfony }}-
+
+      # Explicit constraints instead of Flex's `SYMFONY_REQUIRE`, which pins
+      # *every* Symfony package at once and cannot resolve here: Pest 4 pulls
+      # `symfony/console ^7.3` through paratest and collision, so a global
+      # `6.4.*` makes the job unsolvable. Symfony supports mixing 6.4 components
+      # with a 7.x console, so `symfony/console` stays floating on purpose and
+      # only the packages this bundle actually targets are pinned. Runs after
+      # `composer validate --strict`, which therefore still sees the committed
+      # `composer.json`. Consequence worth knowing: `symfony/framework-bundle`
+      # 6.4.x from 6.4.2 on conflicts with `symfony/console >=7.0`, so this leg
+      # resolves it to 6.4.1. That is a dev-only dependency of this bundle.
+      - name: Pin the Symfony 6.4 components
+        if: matrix.symfony == '6.4.*'
+        run: |
+          composer require --no-update --no-interaction \
+            "symfony/config:6.4.*" \
+            "symfony/dependency-injection:6.4.*" \
+            "symfony/event-dispatcher:6.4.*" \
+            "symfony/http-kernel:6.4.*"
+          composer require --dev --no-update --no-interaction \
+            "symfony/framework-bundle:6.4.*" \
+            "symfony/yaml:6.4.*"
+
+      # `config.platform.php` is 8.3, which Symfony 8 does not install on, so this
+      # leg drops the platform pin and resolves against the job's own PHP. The console is pinned too: Pest 4 accepts 8.x.
+      - name: Pin the Symfony 8 components
+        if: matrix.symfony == '8.*'
+        run: |
+          composer config --unset platform.php
+          composer require --no-update --no-interaction \
+            "symfony/config:8.*" \
+            "symfony/console:8.*" \
+            "symfony/dependency-injection:8.*" \
+            "symfony/event-dispatcher:8.*" \
+            "symfony/http-kernel:8.*"
+          composer require --dev --no-update --no-interaction \
+            "symfony/framework-bundle:8.*" \
+            "symfony/yaml:8.*"
+
+      # `config.platform.php` 8.3 alone keeps this leg off Symfony 8; the pins make
+      # the branch explicit.
+      - name: Pin the Symfony 7 components
+        if: matrix.symfony == '7.*'
+        run: |
+          composer require --no-update --no-interaction \
+            "symfony/config:7.*" \
+            "symfony/console:7.*" \
+            "symfony/dependency-injection:7.*" \
+            "symfony/event-dispatcher:7.*" \
+            "symfony/http-kernel:7.*"
+          composer require --dev --no-update --no-interaction \
+            "symfony/framework-bundle:7.*" \
+            "symfony/yaml:7.*"
+
+      # `update`: there is no lock file, and the steps above have changed
+      # `composer.json`.
+      - name: Install dependencies
+        run: composer update --no-interaction --no-progress --prefer-dist -W
+
+      # The one thing a green job cannot show on its own: which Symfony branch
+      # actually got installed, and that the console is allowed to differ.
+      # One package per `composer show`: a second argument is read as a version
+      # constraint, not as a second package.
+      - name: Show the resolved Symfony versions
+        run: |
+          for package in symfony/console symfony/http-kernel; do
+            composer show "$package" | grep -E "^(name|versions)"
+          done
+
+      # Style, static analysis and the unit and feature suites. No AMQP_URL here
+      # on purpose: the integration suite is not in the default test suites, so
+      # this step fails only on the code.
+      - name: Check (cs + stan + unit + feature)
+        run: composer check
+
+      - name: Integration tests
+        run: composer test:integration
+        env:
+          AMQP_URL: amqp://guest:guest@localhost:5672/%2f

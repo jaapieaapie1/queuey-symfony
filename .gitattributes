@@ -1,0 +1,14 @@
+* text=auto eol=lf
+
+# Keep the Composer dist archive to the bundle itself: tests and development
+# configuration stay in the repository only, and so does docs/DESIGN.md, which is
+# maintainer documentation that README.md does not link to.
+/.editorconfig export-ignore
+/.gitattributes export-ignore
+/.github export-ignore
+/.gitignore export-ignore
+/.php-cs-fixer.dist.php export-ignore
+/docs export-ignore
+/phpstan.neon.dist export-ignore
+/phpunit.xml.dist export-ignore
+/tests export-ignore
